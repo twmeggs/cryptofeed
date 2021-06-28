@@ -188,21 +188,36 @@ class OKCoin(Feed):
                     raise BadChecksum
                 await self.book_callback(self.l2_book[pair], L2_BOOK, pair, False, delta, timestamp_normalize(self.id, update['timestamp']), timestamp)
 
-    async def _order(self, msg: dict, timestamp: float):
-        if msg['data'][0]['status'] == "open":
-            status = "active"
-        else:
-            status = msg['data'][0]['status']
-
-        keys = ('filled_size', 'size', 'filled_notional')
+    async def _spot_order(self, msg: dict, timestamp: float):
+            if msg['data'][0]['status'] == "open":
+                status = "active"
+            else:
+                status = msg['data'][0]['status']
+    
+            keys = ('filled_size', 'size', 'filled_notional')
+            data = {k: Decimal(msg['data'][0][k]) for k in keys if k in msg['data'][0]}
+    
+            await self.callback(ORDER_INFO, feed=self.id,
+                                symbol=symbol_exchange_to_std(msg['data'][0]['instrument_id'].upper()),  # This uses the REST endpoint format (lower case)
+                                status=status,
+                                order_id=msg['data'][0]['order_id'],
+                                side=BUY if msg['data'][0]['side'].lower() == 'buy' else SELL,
+                                order_type=msg['data'][0]['type'],
+                                timestamp=msg['data'][0]['timestamp'].timestamp(),
+                                receipt_timestamp=timestamp,
+                                **data
+                                )
+    async def _swap_order(self, msg: dict, timestamp: float):
+    
+        keys = ('filled_qty', 'last_fill_qty', 'price_avg', 'fee')
         data = {k: Decimal(msg['data'][0][k]) for k in keys if k in msg['data'][0]}
-
+    
         await self.callback(ORDER_INFO, feed=self.id,
                             symbol=symbol_exchange_to_std(msg['data'][0]['instrument_id'].upper()),  # This uses the REST endpoint format (lower case)
-                            status=status,
+                            status=int(msg['data'][0]['state']),
                             order_id=msg['data'][0]['order_id'],
-                            side=BUY if msg['data'][0]['side'].lower() == 'buy' else SELL,
-                            order_type=msg['data'][0]['type'],
+                            side=int(msg['data'][0]['type']),
+                            order_type=int(msg['data'][0]['order_type']),
                             timestamp=msg['data'][0]['timestamp'].timestamp(),
                             receipt_timestamp=timestamp,
                             **data
@@ -236,7 +251,9 @@ class OKCoin(Feed):
             elif 'swap/funding_rate' in msg['table']:
                 await self._funding(msg, timestamp)
             elif 'spot/order' in msg['table']:
-                await self._order(msg, timestamp)
+                await self._spot_order(msg, timestamp)
+            elif 'swap/order' in msg['table']:
+                await self._swap_order(msg, timestamp)
             else:
                 LOG.warning("%s: Unhandled message %s", self.id, msg)
         else:
@@ -261,6 +278,9 @@ class OKCoin(Feed):
         login_str = json.dumps(login_param)
         await conn.send(login_str)
         await asyncio.sleep(5)
-        sub_param = {"op": "subscribe", "args": ["spot/order:{}".format(symbol)]}
+        if "SWAP" in symbol:
+            sub_param = {"op": "subscribe", "args": ["swap/order:{}".format(symbol)]}
+        else:
+            sub_param = {"op": "subscribe", "args": ["spot/order:{}".format(symbol)]}
         sub_str = json.dumps(sub_param)
         await conn.send(sub_str)
